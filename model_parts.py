@@ -1,167 +1,53 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import *
-
-
-class Encoder(nn.Module):
-    """
-    Encoder architecture of a VAE with a specified number of layers, used in VAE3D
-    """
-    def __init__(self, input_shape, latent_dim, num_filters, config_function):
-        super().__init__()
-        layers = config_function(input_shape, latent_dim, num_filters)
-        
-        self.convnet = layers['convnet']
-        self.fc1 = layers['fc1']
-        self.fc2_mu = layers['fc2_mu']
-        self.fc2_logvar = layers['fc2_logvar']
-
-    def forward(self, input):
-
-        x = self.convnet(input)
-        batch_size = x.shape[0]
-        x = x.view(batch_size, -1)
-        h = self.fc1(x)
-        mu  = self.fc2_mu(h)
-        logvar = self.fc2_logvar(h)
-
-        return mu, logvar
-
-class Decoder(nn.Module):
-    """
-    Decoder architecture of a VAE with a specified number of layers, used in VAE3D
-    """
-    def __init__(self, input_shape, latent_dim, num_filters, config_function):
-        super().__init__()
-        layers = config_function(input_shape, latent_dim, num_filters)
-        self.reshape = layers['reshape']
-        self.fc1 = layers['fc1']
-        self.fc2 = layers['fc2']
-        self.convnet = layers['convnet']    
-
-    def forward(self, input):
-
-        h = self.fc1(input)
-        x = self.fc2(h)
-        batch_size = x.shape[0]
-        x = x.view(batch_size, -1, self.reshape[0], self.reshape[1], self.reshape[2])
-        x_recon = self.convnet(x)
-
-        return x_recon
-
-class UEncoder(nn.Module):
-    """
-    Encoder architecture that returns intermediary outputs to be used as skip connections
-    """
-    def __init__(self, input_shape, latent_dim, num_filters):
-        super().__init__()
-
-        self.conv1 = nn.Sequential(
-            nn.Conv3d(input_shape[0], num_filters, kernel_size = 2, stride = 2, padding = 0),
-            nn.ReLU()
-        )
-
-        self.conv2 = nn.Sequential(
-            nn.Conv3d(num_filters, num_filters * 2, kernel_size = 2, stride = 2, padding = 0),
-            nn.ReLU()
-        )
- 
-        self.conv3 = nn.Sequential(
-            nn.Conv3d(num_filters * 2, 1, kernel_size = 1, stride = 1, padding = 0),
-            nn.ReLU()
-        )   
-
-        flattened_size = int(input_shape[1] / 4 * input_shape[2] / 4 * input_shape[3] / 4)
-
-        self.fc_mu = nn.Sequential(
-            nn.Linear(flattened_size, latent_dim),
-            nn.ReLU()
-        )
-
-        self.fc_logvar = nn.Sequential(
-            nn.Linear(flattened_size, latent_dim),
-            nn.ReLU()
-        )
-
-
-    def forward(self, x):
-        x1 = self.conv1(x)
-        x2 = self.conv2(x1)
-        x3 = self.conv3(x2)
-        batch_size = x3.shape[0]
-        x3_flattened = x3.view(batch_size, -1)
-        mu  = self.fc_mu(x3_flattened)
-        logvar = self.fc_logvar(x3_flattened)
-
-        return x1, x2, mu, logvar
-
-class UDecoder(nn.Module):
-    """
-    Decoder architecture that accepts intermediary outputs from encoder as skip connections
-    """
-    def __init__(self, input_shape, latent_dim, num_filters):
-        super().__init__()
-
-        flattened_size = int(input_shape[1] / 4 * input_shape[2] / 4 * input_shape[3] / 4)
-
-        self.fc = nn.Sequential(
-                nn.Linear(latent_dim, flattened_size),
-                nn.ReLU()
-            )
-
-        self.reshape = (input_shape[1] // 4, input_shape[2] // 4, input_shape[3] // 4)
-        
-        self.conv1 = nn.Sequential(
-            nn.ConvTranspose3d(1, num_filters * 2, kernel_size = 1, stride = 1, padding = 0),
-            nn.ReLU()
-            )
-
-        self.conv2 = nn.Sequential(
-            nn.ConvTranspose3d(num_filters * 4, num_filters, kernel_size = 2, stride = 2, padding = 0),
-            nn.ReLU()
-            )
-
-        self.conv3 = nn.ConvTranspose3d(num_filters * 2, input_shape[0], kernel_size = 2, stride = 2, padding = 0)
-        
-
-    def forward(self, x, encoder_layer1_output, encoder_layer2_output):
-
-        h = self.fc(x)
-        batch_size = h.shape[0]
-        h = h.view(batch_size, -1, self.reshape[0], self.reshape[1], self.reshape[2])
-        x1 = self.conv1(h)
-        x2 = torch.cat([encoder_layer2_output, x1], dim = 1)
-        x3 = self.conv2(x2)
-        x4 = torch.cat([encoder_layer1_output, x3], dim = 1)
-        x_recon = self.conv3(x4)
-
-        return x_recon
+import numpy as np
 
 
 class VQEncoder(nn.Module):
     """
     Encoder architecture that outputs a volume to a quantization layer. Also outputs skip connections
     """
-    def __init__(self, num_channels, num_filters = 8, embedding_dim = 32, skip_connections = False):
+    def __init__(self, num_channels, num_filters = 8, embedding_dim = 32, skip_connections = False, batchnorm = False):
         super().__init__()
 
         self.skip = skip_connections
 
-        self.conv1 = nn.Sequential(
-            nn.Conv3d(num_channels, num_filters, kernel_size = 4, stride = 2, padding = 1),
-            nn.ReLU()
-        )
+        if batchnorm:
+            self.conv1 = nn.Sequential(
+                nn.Conv3d(num_channels, num_filters, kernel_size = 4, stride = 2, padding = 1),
+                nn.BatchNorm3d(num_filters),
+                nn.ReLU()
+            )
 
-        self.conv2 = nn.Sequential(
-            nn.Conv3d(num_filters, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
-            nn.ReLU()
-        )
+            self.conv2 = nn.Sequential(
+                nn.Conv3d(num_filters, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
+                nn.BatchNorm3d(num_filters * 2),
+                nn.ReLU()
+            )
 
-        self.conv3 = nn.Sequential(
-            nn.Conv3d(num_filters * 2, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
-            nn.ReLU()
-        )
+            self.conv3 = nn.Sequential(
+                nn.Conv3d(num_filters * 2, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
+                nn.BatchNorm3d(num_filters * 4),
+                nn.ReLU()
+            )
+
+        else:
+
+            self.conv1 = nn.Sequential(
+                nn.Conv3d(num_channels, num_filters, kernel_size = 4, stride = 2, padding = 1),
+                nn.ReLU()
+            )
+
+            self.conv2 = nn.Sequential(
+                nn.Conv3d(num_filters, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
+                nn.ReLU()
+            )
+
+            self.conv3 = nn.Sequential(
+                nn.Conv3d(num_filters * 2, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
+                nn.ReLU()
+            )
 
         self.conv4 = nn.Sequential(
             nn.Conv3d(num_filters * 4, embedding_dim, kernel_size = 4, stride = 2, padding = 1)
@@ -184,24 +70,45 @@ class VQDecoder_skip(nn.Module):
     """
     Decoder architecture that accepts a volume from a quantization layer and skip connections from the encoder
     """
-    def __init__(self, num_channels, num_filters = 8, embedding_dim = 32):
+    def __init__(self, num_channels, num_filters = 8, embedding_dim = 32, batchnorm = False):
         super().__init__()
 
-        self.conv1 = nn.Sequential(
-            nn.ConvTranspose3d(embedding_dim, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
-            nn.ReLU()
-            )
+        if batchnorm:
+            self.conv1 = nn.Sequential(
+                nn.ConvTranspose3d(embedding_dim, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
+                nn.BatchNorm3d(num_filters * 4),
+                nn.ReLU()
+                )
 
-        self.conv2 = nn.Sequential(
-            nn.ConvTranspose3d(num_filters * 8, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
-            nn.ReLU()
-            )
+            self.conv2 = nn.Sequential(
+                nn.ConvTranspose3d(num_filters * 8, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
+                nn.BatchNorm3d(num_filters * 2),
+                nn.ReLU()
+                )
 
 
-        self.conv3 = nn.Sequential(
-            nn.ConvTranspose3d(num_filters * 4, num_filters, kernel_size = 4, stride = 2, padding = 1),
-            nn.ReLU()
-            )
+            self.conv3 = nn.Sequential(
+                nn.ConvTranspose3d(num_filters * 4, num_filters, kernel_size = 4, stride = 2, padding = 1),
+                nn.BatchNorm3d(num_filters),
+                nn.ReLU()
+                )
+
+        else:
+            self.conv1 = nn.Sequential(
+                nn.ConvTranspose3d(embedding_dim, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
+                nn.ReLU()
+                )
+
+            self.conv2 = nn.Sequential(
+                nn.ConvTranspose3d(num_filters * 8, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
+                nn.ReLU()
+                )
+
+
+            self.conv3 = nn.Sequential(
+                nn.ConvTranspose3d(num_filters * 4, num_filters, kernel_size = 4, stride = 2, padding = 1),
+                nn.ReLU()
+                )
 
         self.conv4 = nn.ConvTranspose3d(num_filters * 2, num_channels, kernel_size = 4, stride = 2, padding = 1)
         
@@ -223,24 +130,45 @@ class VQDecoder(nn.Module):
     """
     Decoder architecture that accepts a volume from a quantization layer 
     """
-    def __init__(self, num_channels, num_filters = 8, embedding_dim = 32):
+    def __init__(self, num_channels, num_filters = 8, embedding_dim = 32, batchnorm = False):
         super().__init__()
 
-        self.conv1 = nn.Sequential(
-            nn.ConvTranspose3d(embedding_dim, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
-            nn.ReLU()
-            )
+        if batchnorm:
+            self.conv1 = nn.Sequential(
+                nn.ConvTranspose3d(embedding_dim, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
+                nn.BatchNorm3d(num_filters * 4),
+                nn.ReLU()
+                )
 
-        self.conv2 = nn.Sequential(
-            nn.ConvTranspose3d(num_filters * 4, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
-            nn.ReLU()
-            )
+            self.conv2 = nn.Sequential(
+                nn.ConvTranspose3d(num_filters * 4, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
+                nn.BatchNorm3d(num_filters * 2),
+                nn.ReLU()
+                )
 
 
-        self.conv3 = nn.Sequential(
-            nn.ConvTranspose3d(num_filters * 2, num_filters, kernel_size = 4, stride = 2, padding = 1),
-            nn.ReLU()
-            )
+            self.conv3 = nn.Sequential(
+                nn.ConvTranspose3d(num_filters * 2, num_filters, kernel_size = 4, stride = 2, padding = 1),
+                nn.BatchNorm3d(num_filters),
+                nn.ReLU()
+                )
+
+        else:
+            self.conv1 = nn.Sequential(
+                nn.ConvTranspose3d(embedding_dim, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
+                nn.ReLU()
+                )
+
+            self.conv2 = nn.Sequential(
+                nn.ConvTranspose3d(num_filters * 4, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
+                nn.ReLU()
+                )
+
+
+            self.conv3 = nn.Sequential(
+                nn.ConvTranspose3d(num_filters * 2, num_filters, kernel_size = 4, stride = 2, padding = 1),
+                nn.ReLU()
+                )
 
         self.conv4 = nn.ConvTranspose3d(num_filters, num_channels, kernel_size = 4, stride = 2, padding = 1)
         
@@ -313,78 +241,6 @@ class Up(nn.Module):
         x = torch.cat([x2, x1], dim=1)
         x = self.conv(x)
         return x
-
-
-class PixelShuffle3D(nn.Module):
-    """
-    Last step of Subpixel Deconvolution, as described in Shi et al. 2016. 
-    Taken from authors of Tudosiu et al. 2020 at https://github.com/danieltudosiu/nmpevqvae/blob/master/network.py
-    """
-
-    def __init__(self, upscale_factor):
-        super(PixelShuffle3D, self).__init__()
-        self.upscale_factor = upscale_factor
-        self.upscale_factor_cubed = upscale_factor ** 3
-        self._shuffle_out = None
-        self._shuffle_in = None
-
-    def forward(self, input):
-        shuffle_out = input.new()
-
-        batch_size = input.size(0)
-        channels = int(input.size(1) / self.upscale_factor_cubed)
-        in_depth = input.size(2)
-        in_height = input.size(3)
-        in_width = input.size(4)
-
-        input_view = input.view(
-            batch_size,
-            channels,
-            self.upscale_factor,
-            self.upscale_factor,
-            self.upscale_factor,
-            in_depth,
-            in_height,
-            in_width,
-        )
-
-        shuffle_out.resize_(
-            input_view.size(0),
-            input_view.size(1),
-            input_view.size(5),
-            input_view.size(2),
-            input_view.size(6),
-            input_view.size(3),
-            input_view.size(7),
-            input_view.size(4),
-        )
-
-        shuffle_out.copy_(input_view.permute(0, 1, 5, 2, 6, 3, 7, 4))
-
-        out_depth = in_depth * self.upscale_factor
-        out_height = in_height * self.upscale_factor
-        out_width = in_width * self.upscale_factor
-
-        output = shuffle_out.view(
-            batch_size, channels, out_depth, out_height, out_width
-        )
-
-        return output
-
-
-class SubPixel3D(nn.Module):
-    """
-    Performs SubPixel Deconvolution to upsample a 3D image, according to Shi et al. 2016
-    """
-    def __init__(self, filters_in, filters_out, upsampling_factor):
-        super().__init__()
-        self.convnet = nn.Sequential(
-            nn.Conv3d(filters_in, filters_out * 2 ** 3, kernel_size = 3, stride = 1, padding = 1),
-            PixelShuffle3D(upsampling_factor)
-            )
-
-    def forward(self, x):
-        return self.convnet(x)
 
 
 class VectorQuantizerEMA(nn.Module):
@@ -463,6 +319,3 @@ class VectorQuantizerEMA(nn.Module):
         
         # convert quantized from BHWDC -> BCHWD
         return loss, quantized.permute(0, 4, 1, 2, 3).contiguous(), perplexity, encodings
-
-        
-

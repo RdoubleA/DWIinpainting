@@ -4,17 +4,16 @@ import numpy as np
 
 """
 PyTorch Dataset generator class to be used in DataLoader
-
-This one is specifically tailored for unsupervised models
 """
 class Dataset(data.Dataset):
     """
     file_list = sequence of filepaths to each sample
+    corrupt_prob = probability from 0 to 1 of how likely a loaded image will be artificially cropped
+    tanh_norm = if True, normalize to range -1 to 1 instead of 0 to 1. Used for GAN architectures
+    num_corrupt = number of axial slices to remove from the top for artificial cropping
     """
-    def __init__(self, file_list, corrupt_prob = 0.0, crop = False, pad = False, tanh_norm = False, num_corrupt = 16):
+    def __init__(self, file_list, corrupt_prob = 0.0, tanh_norm = False, num_corrupt = 8):
         self.inputs = file_list
-        self.crop = crop
-        self.pad = pad
         self.p_corrupt = corrupt_prob
         self.tanh = tanh_norm
         self.num_corrupt = num_corrupt
@@ -33,17 +32,9 @@ class Dataset(data.Dataset):
         r = np.random.uniform()
 
         # Load data
-        #print('loading single sample')
-        Xout = np.load(sample)
-        # Padding is requires if we are to use more than three downsampling layers (divide each dimension by 2 more than twice)
-        if self.pad:
-            Xout = np.pad(Xout, pad_width=((0,0),(4,4),(0,0)))
-        if self.crop:
-            Xout = Xout[:,:,-64:]
-        # else:
-        #     # Zero pad to make z-dimension divisible by 2, will make convolutional layers work better
-        #     Xout = np.pad(Xout,pad_width=((0,0),(0,0),(0,1)))
+        Xout = np.load(sample, allow_pickle = True)
 
+        # Corrupt image by cropping - setting a fixed number of slices in axial direction to 0
         if r < self.p_corrupt:
             Xin = np.array(Xout)
             Xin[:,:,-self.num_corrupt:] = 0
@@ -54,6 +45,7 @@ class Dataset(data.Dataset):
             Xout = Xout * 2 - 1
             Xin = Xin * 2 - 1
 
+        # Prep in tensor format
         batch_x = torch.from_numpy(Xin).float()
         batch_x = batch_x.view(1,batch_x.shape[0],batch_x.shape[1],batch_x.shape[2])
         batch_y = torch.from_numpy(Xout).float()

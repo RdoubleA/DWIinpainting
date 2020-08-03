@@ -3,69 +3,31 @@ import torch.nn as nn
 from model_parts import *
 
 
-class VAE3D(nn.Module):
-    """
-    Full VAE architecture with encoder, latent sampling, and decoder
-    """
-    def __init__(self, input_shape, latent_dim, num_filters, encoder_config, decoder_config):
-        super().__init__()
-
-        self.encoder = Encoder(input_shape, latent_dim, num_filters, encoder_config)
-        self.decoder = Decoder(input_shape, latent_dim, num_filters, decoder_config)
-
-    def forward(self, x):
-        # First pass through encoder
-        mu, logvar = self.encoder(x)
-
-        # Sample from latent distribution using reparametrization
-        std = torch.exp(logvar / 2)
-        eps = torch.randn_like(std)
-        z = eps.mul(std).add_(mu)
-
-        # Pass through decoder
-        x_recon = self.decoder(z)
-
-        return x_recon, mu, logvar
-
-
-class UVAE3D(nn.Module):
-    """
-    U-shaped VAE architecture with skip connections from encoder layers to decoder
-    """
-    def __init__(self, input_shape, latent_dim, num_filters):
-        super().__init__()
-
-        self.encoder = UEncoder(input_shape, latent_dim, num_filters)
-        self.decoder = UDecoder(input_shape, latent_dim, num_filters)
-
-    def forward(self, x):
-        # First pass through encoder
-        layer1, layer2, mu, logvar = self.encoder(x)
-
-        # Sample from latent distribution using reparametrization
-        std = torch.exp(logvar / 2)
-        eps = torch.randn_like(std)
-        z = eps.mul(std).add_(mu)
-
-        # Pass through decoder
-        x_recon = self.decoder(z, layer1, layer2)
-
-        return x_recon, mu, logvar
-
 class VQVAE3D(nn.Module):
     """
-    Replace the latent layer with vector quantization as described in Oord et al. 2017
+    VQVAE and U-VQVAE models
+
+    Replace the latent layer in a variational autoencoder with vector quantization as described in Oord et al. 2017
     Also include skip connections
+
+    num_channels = number of input channels. In our case, this is just 1 due to grayscale images
+    num_filters = number of filters in the first convolutional layer, this doubles with every convolutional layer
+    embedding_dim = dimensionality of vectors in the embedding space
+    num_embeddings = number of vectors in the embedding space
+    skip_connections = if True, the model is U-VQVAE. if False, the model is VQVAE.
+    batchnorm = if True, include batchnorm layers after every convolutional layer
+
     """
-    def __init__(self, num_channels, num_filters, embedding_dim = 32, num_embeddings = 512, skip_connections = True):
+    def __init__(self, num_channels, num_filters, embedding_dim = 32, num_embeddings = 512, skip_connections = True, batchnorm = False):
         super().__init__()
         self.skip = skip_connections
-        self.encoder = VQEncoder(num_channels, num_filters, embedding_dim, skip_connections = skip_connections)
+        self.encoder = VQEncoder(num_channels, num_filters, embedding_dim, skip_connections = skip_connections, batchnorm = batchnorm)
         self.quantization = VectorQuantizerEMA(num_embeddings = num_embeddings, embedding_dim = embedding_dim)
+        # If skip connections enabled, use a different class for decoder that uses skip connections
         if skip_connections:
-            self.decoder = VQDecoder_skip(num_channels, num_filters, embedding_dim)
+            self.decoder = VQDecoder_skip(num_channels, num_filters, embedding_dim, batchnorm)
         else:
-            self.decoder = VQDecoder(num_channels, num_filters, embedding_dim)
+            self.decoder = VQDecoder(num_channels, num_filters, embedding_dim, batchnorm)
 
     def forward(self, x):
         if self.skip:
@@ -77,58 +39,22 @@ class VQVAE3D(nn.Module):
             loss, zq, perplexity, _ = self.quantization(ze)
             x_recon = self.decoder(zq)
 
-        return loss, x_recon, perplexity
+        outputs = {'x_out': x_recon,
+                   'vq_loss': loss}
 
-class UVAEtop(nn.Module):
-    """
-    U-shaped VAE architecture that's only trained to recreate just the missing part of an image
-    """
-    pass
+        return outputs
 
-
-class CropDiscriminator(nn.Module):
-    """
-    Fully convolutional network that uses 1x1 convolutions and convolutional layers
-    to classify only the cropped part of a generated image as good brain reconstruction or bad
-
-    Code is largely based off the DCGAN PyTorch tutorial
-    """
-    def __init__(self, input_shape, num_filters):
-        super().__init__()
-        self.convnet = nn.Sequential(
-            nn.Conv3d(input_shape[0], num_filters, kernel_size = 4, stride = 2, padding = 1),
-            nn.LeakyReLU(0.2, inplace = True),
-            nn.Conv3d(num_filters, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
-            nn.BatchNorm3d(num_filters * 2),
-            nn.LeakyReLU(0.2, inplace = True),
-            nn.Conv3d(num_filters * 2, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
-            nn.BatchNorm3d(num_filters * 4),
-            nn.LeakyReLU(0.2, inplace = True),
-            nn.Conv3d(num_filters * 4, num_filters * 8, kernel_size = 4, stride = 2, padding = 1),
-            nn.BatchNorm3d(num_filters * 8),
-            nn.LeakyReLU(0.2, inplace = True)
-        )
-
-        flattened_size = input_shape[1] // 16 * input_shape[2] // 16 * input_shape[3] // 16 * num_filters * 8
-
-        self.fc = nn.Sequential(
-                nn.Linear(flattened_size, 1),
-                nn.Sigmoid()
-        )
-
-        
-        
-    def forward(self, x):
-        x = self.convnet(x)
-        batch_size = x.shape[0]
-        x = x.view(batch_size, -1)
-        out = self.fc(x)
-        return out
 
 class UNet(nn.Module):
     """
     U-shaped VQVAE architecture with skip connections from encoder layers to decoder, 
     similar to original U-net by Ronneberger et al. 2015, but not the exact same.
+
+    num_channels = number of input channels. In our case, this is just 1 due to grayscale images
+    num_filters = number of filters in the first Down layer, this doubles after every Down layer    
+    bilinear = if True, use bilinear interpolation to upsample in the decoder, which does not use learned weights
+               if False, use transpose convolutions with learned weights, which is more memory intensive
+
     """
     def __init__(self, num_channels, num_filters = 4, bilinear = True):
         super().__init__()
@@ -162,16 +88,24 @@ class UNet(nn.Module):
         xd1 = self.up4(xd2, xe1)
         out = self.outconv(xd1)
 
-        return out
+        outputs = {'x_out': out}
+
+        return outputs
 
 
-class Discriminator(nn.Module):
+class PatchDiscriminator(nn.Module):
     """
-    Patchwise discriminator architecture for use in a GAN setup
+    Patchwise discriminator architecture for use in a GAN setup. 
+    Outputs a probability map, where each element classifies a 16x16x16 patch in the original image.
+    For inputs 96x96x64, the output is 6x6x4.
+    Also outputs the image representation from the third convolutional layer to be used in th ereconstruction loss, as in Larsen et al. 2016
+
+    num_channels = number of input channels. In our case, this is just 1 due to grayscale images
+    num_filters = number of filters in the first convolutional layer, this doubles with every convolutional layer
     """
     def __init__(self, num_channels, num_filters):
         super().__init__()
-        self.convnet = nn.Sequential(
+        self.conv1 = nn.Sequential(
             nn.Conv3d(num_channels, num_filters, kernel_size = 4, stride = 2, padding = 1),
             nn.LeakyReLU(0.2),
             nn.Conv3d(num_filters, num_filters * 2, kernel_size = 4, stride = 2, padding = 1),
@@ -179,7 +113,10 @@ class Discriminator(nn.Module):
             nn.LeakyReLU(0.2),
             nn.Conv3d(num_filters * 2, num_filters * 4, kernel_size = 4, stride = 2, padding = 1),
             nn.BatchNorm3d(num_filters * 4),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2)
+        )
+
+        self.conv2 = nn.Sequential(
             nn.Conv3d(num_filters * 4, num_filters * 8, kernel_size = 4, stride = 2, padding = 1),
             nn.BatchNorm3d(num_filters * 8),
             nn.LeakyReLU(0.2),
@@ -189,12 +126,6 @@ class Discriminator(nn.Module):
         
         
     def forward(self, x):
-        return self.convnet(x)
-
-
-class AVIDDiscriminator(nn.Module):
-    """
-    Discriminator network as used in Sabokrou et al. 2019
-    Borrowed from https://github.com/masoudpz/AVID-Adversarial-Visual-Irregularity-Detection/blob/master/model.py
-    """
-    pass
+        intermediate = self.conv1(x)
+        out = self.conv2(intermediate)
+        return out, intermediate

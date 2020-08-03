@@ -1,6 +1,2 @@
-celeba/
-examples/
-*.key
-test_images/
-testdata/
-models/
+old/
+__pycache__/

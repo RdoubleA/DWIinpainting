@@ -17,6 +17,7 @@ Arguments
       (original image, reconstructed image, latent mean, latent logvariance)
     - training_generator: pytorch DataLoader object that is a generator to yield batches of training data
     - epoch: integer specifying which epoch we're on, zero indexed. sole purpose is for printing progress
+    - log_every_num_batches: integere specify after how many batches do we print progress
 """
 def train(model, optimizer, loss_function, training_generator, epoch, log_every_num_batches = 40):
     print('====> Begin epoch {}'.format(epoch+1))
@@ -45,15 +46,15 @@ def train(model, optimizer, loss_function, training_generator, epoch, log_every_
         # Clear optimizer gradients
         optimizer.zero_grad()
         # Forward pass through the model
-        #batch_recon, mu, logvar = model(batch_in)
-        vq_loss, batch_recon, perplexity = model(batch_in)
-        #batch_recon = model(batch_in)
+        outputs = model(batch_in)
         
         # Calculate loss
-        #loss = loss_function(batch_out, batch_recon, mu, logvar)
-        recon_loss = loss_function(batch_recon, batch_out)
-        loss = recon_loss + vq_loss
-        #loss = recon_loss
+        recon_loss = loss_function(outputs['x_out'], batch_out)
+        if 'vq_loss' in outputs:
+            loss = recon_loss + outputs['vq_loss']
+        else:
+            loss = recon_loss
+
         # Back propagate
         loss.backward()
         train_loss += loss.item()
@@ -105,15 +106,14 @@ def test(model, loss_function, validation_generator):
             # Transfer to GPU
             batch_in, batch_out = batch_in.to(device), batch_out.to(device)
             # Forward pass through the model
-            #batch_recon, mu, logvar = model(batch_in)
-            vq_loss, batch_recon, perplexity = model(batch_in)
-            #batch_recon = model(batch_in)
-        
+            outputs = model(batch_in)
+            
             # Calculate loss
-            #loss = loss_function(batch_out, batch_recon, mu, logvar)
-            recon_loss = loss_function(batch_recon, batch_out)
-            loss = recon_loss + vq_loss
-            #loss = recon_loss
+            recon_loss = loss_function(outputs['x_out'], batch_out)
+            if 'vq_loss' in outputs:
+                loss = recon_loss + outputs['vq_loss']
+            else:
+                loss = recon_loss
             test_loss += loss.item()
     
     t_epoch = time.time() - t0
@@ -142,17 +142,24 @@ def plot_loss(history, xmin = 0, xmax = 30, ymin = 0, ymax = 5000):
 """
 Test the model on validation data set and plot generated images
 """
-def test_model(model, validation_generator, batch_size = 128, num_plot = 6):
+def test_model(model, validation_generator, num_plot = 6):
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    torch.backends.cudnn.benchmark = True
     plot_batch_in, plot_batch_out = next(iter(validation_generator))
+    plot_batch_in, plot_batch_out = plot_batch_in.to(device), plot_batch_out.to(device)
     model.eval()
-    model.to('cpu')
-    _, plot_recon, _ = model(plot_batch_in)
-    #plot_recon, _, _ = model(plot_batch_in)
-    x_recon = plot_recon.detach().numpy().squeeze()
-    x_corr = plot_batch_in.detach().numpy().squeeze()
-    x_clean = plot_batch_out.detach().numpy().squeeze()
+    model.to(device)
+    outputs = model(plot_batch_in)
+    if ("rec") in outputs:
+        plot_recon = outputs[("rec")]
+    else:
+        plot_recon = outputs['x_out']
+    x_recon = plot_recon.cpu().detach().numpy().squeeze()
+    x_corr = plot_batch_in.cpu().detach().numpy().squeeze()
+    x_clean = plot_batch_out.cpu().detach().numpy().squeeze()
 
-    ssim_orig2recon = [structural_similarity(x_clean[i][:,:,-16:], x_recon[i][:,:,-16:], data_range = 1) for i in range(batch_size)]
+    ssim_orig2recon = [structural_similarity(x_clean[i][:,:,-8:], x_recon[i][:,:,-8:], data_range = 1) for i in range(x_recon.shape[0])]
 
     for i in range(num_plot):
         plt.close('all')
@@ -162,11 +169,11 @@ def test_model(model, validation_generator, batch_size = 128, num_plot = 6):
         dwi_corr = nib.Nifti1Image(x_corr[i], np.eye(4))
         dwi_recon = nib.Nifti1Image(x_recon[i], np.eye(4))
         # Plot original
-        plot_anat(dwi_clean, axes = ax[0], vmin = -0.1, vmax = 0.3, cut_coords = (70,60,10))
+        plot_anat(dwi_clean, axes = ax[0], vmin = -0.1, vmax = 0.3)
         # Plot corrupt
-        plot_anat(dwi_corr, axes = ax[1], vmin = -0.1, vmax = 0.3, cut_coords = (70,60,10))
+        plot_anat(dwi_corr, axes = ax[1], vmin = -0.1, vmax = 0.3)
         # Plot reconstructed
-        plot_anat(dwi_recon, axes = ax[2], vmin = -0.1, vmax = 0.3, cut_coords = (70,60,10))
+        plot_anat(dwi_recon, axes = ax[2], vmin = -0.1, vmax = 0.3)
         
         ax[0].set_title('original')
         ax[1].set_title('cropped')
@@ -175,3 +182,5 @@ def test_model(model, validation_generator, batch_size = 128, num_plot = 6):
         
     print('Average SSIM: %.6f' % np.mean(ssim_orig2recon))
     print('STD SSIM: %.6f' % np.std(ssim_orig2recon))
+
+    return np.mean(ssim_orig2recon), np.std(ssim_orig2recon)
